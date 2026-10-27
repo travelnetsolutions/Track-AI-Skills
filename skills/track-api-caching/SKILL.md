@@ -1,6 +1,6 @@
 ---
 name: track-api-caching
-description: Review and improve how a codebase caches and syncs data from the Track Hospitality API (developer.trackhs.com), following Track's "Caching Data on a Local Server" guide. Use when a developer integrating with Track wants to audit their sync jobs, cut API traffic, stop re-downloading every unit or reservation, move to delta or updatedSince syncing, pick polling intervals, or asks "is my Track integration caching correctly", "review my Track sync", "how often should I poll Track", "use the unit delta endpoint", "contentUpdatedSince / availabilityUpdatedSince / pricingUpdatedSince", or "keep a local copy of Track units, rates, availability or reservations". Works in any language.
+description: Review and improve how a codebase caches and syncs data from the Track Hospitality API (developer.trackhs.com), following Track's "Caching Data on a Local Server" and "Change Detection and Incremental Sync" guides. Use when a developer integrating with Track wants to audit their sync jobs, cut API traffic, stop re-downloading every unit or reservation, move to delta or updatedSince syncing, pick polling intervals, or asks "is my Track integration caching correctly", "review my Track sync", "how often should I poll Track", "use the unit delta endpoint", "contentUpdatedSince / availabilityUpdatedSince / pricingUpdatedSince", or "keep a local copy of Track units, rates, availability or reservations". Works in any language.
 ---
 
 # Track API caching review
@@ -75,7 +75,8 @@ Severity guide:
 - **High**: full reloads on a timer, no cache for data read on every request,
   watermark that can skip changes, delta calls that silently drop a parameter.
 - **Medium**: intervals far outside the recommended range, timestamps without
-  a UTC offset, pagination that stops early or ignores the result cap.
+  a UTC offset or with an unencoded `+`, pagination that stops early or
+  ignores the result cap, jobs that can breach the rate limit.
 - **Low**: missing periodic full resync, logging and observability gaps.
 
 Also list what the code already does well, so the developer knows what to keep.

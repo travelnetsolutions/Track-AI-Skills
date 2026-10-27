@@ -15,10 +15,8 @@ if watermark is None:
     full_load(KIND)                     # C2: snapshot once
     return
 
-next_watermark = now_utc_iso8601()      # C13: capture BEFORE the request
-                                        # C6: e.g. 2026-07-31T05:00:00+00:00
-
-resp = GET /pms/units/delta?{PARAM}={watermark}
+resp = GET /pms/units/delta?{PARAM}={urlencode(watermark)}   # C6: offset, %2B-encoded
+next_watermark = resp.headers["Date"] - few_minutes          # C13: Track's clock, run start, overlap
 for unit_id in resp.updated:            # C8: ids only
     data = fetch_one(KIND, unit_id)     # /pms/units/{id}/pricing or /v2/pms/units/{id}/availability
     store.upsert(KIND, unit_id, data)   # C13: idempotent
@@ -30,9 +28,9 @@ store.set_watermark(KIND, next_watermark)   # C13: only after everything succeed
 
 ```
 watermark      = store.get_watermark("content")
-next_watermark = now_utc_iso8601()
 
-resp = GET /pms/units/delta?contentUpdatedSince={watermark}
+resp = GET /pms/units/delta?contentUpdatedSince={urlencode(watermark)}
+next_watermark = resp.headers["Date"] - few_minutes
 
 changed = resp.updated
 for batch in chunks(changed):
@@ -51,11 +49,12 @@ store.set_watermark("content", next_watermark)
 
 ```
 watermark      = store.get_watermark("reservations")
-next_watermark = now_utc_iso8601()
+next_watermark = None
 
-for page in paginate(GET /v2/pms/reservations?updatedSince={watermark}):   # C12: follow _links.next,
-    for r in page:                                                         # or use scroll for big sets
-        store.upsert_reservation(r)
+for page, headers in paginate(GET /v2/pms/reservations?updatedSince={urlencode(watermark)}):  # C12
+    next_watermark = next_watermark or headers["Date"] - few_minutes   # first response = run start
+    for r in page:
+        store.upsert_reservation(r)     # C18: Cancelled arrives as an update
 
 store.set_watermark("reservations", next_watermark)
 ```
@@ -65,16 +64,18 @@ store.set_watermark("reservations", next_watermark)
 ```
 def paginate(url):
     while url:
-        body = GET url
-        yield body._embedded.<collection>
-        url = body._links.next.href if body._links.next else None
+        resp = GET url
+        yield resp.body._embedded.<collection>, resp.headers
+        url = resp.body._links.next.href if resp.body._links.next else None
 ```
 
 Stop and alert if `total_items` is above 10,000 on a paged (non-scroll)
 collection: those results are unreachable by paging (C12).
 
-## Nightly or weekly
+## Weekly (or as needed)
 
 ```
-full_load(every kind)                   # C15: repairs drift
+full_load(every kind)                   # C15: reconciliation repairs drift
 ```
+
+Stagger the jobs so they do not all fire on the same tick (C17).

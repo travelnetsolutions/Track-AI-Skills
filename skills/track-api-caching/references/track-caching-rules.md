@@ -11,6 +11,9 @@ Sources:
 - **Unit Collection**: API reference, `GET /pms/units`
 - **Reservations v2**: API reference, `GET /v2/pms/reservations`
 - **Unit Types Delta**: API reference, `GET /pms/units/types/delta`
+- **Change Detection**: [Change Detection and Incremental Sync](https://developer.trackhs.com/docs/change-detection-and-incremental-sync)
+- **Rate Limits**: [Rate Limits](https://developer.trackhs.com/docs/rate-limits)
+- **Webhooks FAQ**: [Does Track have any webhooks that push data out to channels?](https://developer.trackhs.com/docs/does-track-have-any-webhooks-that-push-data-out-to-channels)
 
 ## The core pattern (Guide)
 
@@ -23,11 +26,15 @@ Sources:
 | Unit content | `GET /pms/units` (all pages) | `GET /pms/units/delta?contentUpdatedSince=` or `GET /pms/units?contentUpdatedSince=` | 15 to 30 min |
 | Availability | per unit, e.g. `GET /v2/pms/units/{unitId}/availability` | `GET /pms/units/delta?availabilityUpdatedSince=`, then refresh those units | 5 to 10 min |
 | Pricing | per unit, e.g. `GET /pms/units/{unitId}/pricing` | `GET /pms/units/delta?pricingUpdatedSince=`, then refresh those units | 5 to 10 min |
-| Reservations | `GET /pms/reservations` or `/v2/pms/reservations` (all pages) | same endpoint with `updatedSince=` | not stated; match how fresh you need it |
+| Reservations | `GET /pms/reservations` or `/v2/pms/reservations` (all pages) | same endpoint with `updatedSince=` | every few minutes for booking channels, especially where holds auto-cancel (Change Detection) |
 | Unit types | `GET /pms/units/types` | `GET /pms/units/types/delta` | not stated |
 
-The Guide says intervals can be adjusted to fit your needs. Treat them as a
-starting point, not a limit.
+The Guide says intervals can be adjusted to fit your needs. Change Detection
+gives wider ranges: availability and pricing every few minutes to hourly,
+unit content hourly to daily, accounting, owners, CRM and work orders hourly
+to daily. Treat both as starting points, not limits. Change Detection also
+lists `updatedSince` support on CRM, owners, accounting, folio transactions,
+work orders and reviews, so the same pattern applies there.
 
 ## Checklist
 
@@ -58,17 +65,25 @@ missing changes without any error.
 On `GET /pms/units`, `updatedSince` is deprecated. Use `contentUpdatedSince`.
 **Flag:** `/pms/units?updatedSince=`.
 
-### C6. Fully-qualified timestamps (Unit Delta)
+### C6. Fully-qualified, URL-encoded timestamps (Unit Delta, Change Detection)
 Send ISO 8601 with a UTC offset, for example `2026-07-31T00:00:00-05:00`.
 Without an offset the value is resolved against the account's company
 timezone and the window can shift by several hours. The response's `date`
 field echoes your cutoff normalized to UTC.
+URL-encode the query string: a `+` in the offset must be sent as `%2B`, or it
+arrives as a space. Build the query with the language's query-string encoder.
 **Flag:** timestamps built as `Y-m-d H:i:s`, `toLocaleString`, a bare date, or
-any format with no offset.
+any format with no offset; and query strings built by concatenation that
+leave a `+` offset unencoded.
 
-### C7. Exclusive cutoff (Unit Delta)
-A record whose timestamp exactly equals your cutoff is not returned.
-**Flag:** logic that assumes the cutoff is inclusive.
+### C7. Boundaries differ by endpoint (Unit Delta, Change Detection)
+The unit delta endpoints are exclusive: a record whose timestamp exactly
+equals your cutoff is not returned. Some other filters are inclusive (for
+example accounting transactions, reviews and leads). The overlap-and-upsert
+pattern in C13 is correct either way, so code should not special-case each
+endpoint.
+**Flag:** logic that depends on a boundary being inclusive or exclusive
+instead of overlapping and upserting.
 
 ### C8. Delta returns ids, not records (Unit Delta)
 `updated` is a list of unit ids. Fetch the current data for those ids
@@ -108,17 +123,25 @@ Collections are paged with `page` and `size`, and limited to 10,000 total
 results (`page * size`). Follow `_links.next` until it is absent. For large
 reservation sets, `GET /v2/pms/reservations` supports `scroll` (start with
 `1`, then follow `_links.next`; sorting is disabled while scrolling).
+If a first run or a long outage produces more than 10,000 reservations,
+split the window into smaller date ranges (Change Detection). The delta
+endpoints return one response with no pagination.
 **Flag:** code that reads only the first page, assumes one page holds
 everything, or pages past 10,000 results and silently gets nothing.
 
-### C13. Durable watermark, advanced safely (General practice)
-Store the "last synced" timestamp per data type somewhere that survives a
-restart. Capture the new watermark before you send the request, and save it
-only after every page has been fetched and stored. If a run fails, keep the
-old watermark so the next run retries the same window. Upserts should be
-idempotent so re-processing a record is harmless.
-**Flag:** watermark kept only in memory, reset on deploy, set to "now" after
-the request returns, or advanced even when the sync failed partway.
+### C13. Durable cursor, advanced safely (Change Detection)
+Store the cursor (the point the last successful run covered) per data type
+somewhere that survives a restart. Set the next cursor to **when the run
+started, minus a few minutes of overlap**, and read that start time from the
+`Date` header of Track's first response, not the local clock, which can
+drift. Do not use the latest `updatedAt` received: reservation collections
+are not ordered by it. Save the cursor only after every page succeeded; if a
+run fails, keep the old cursor so the next run repeats the window. Upsert by
+`id`, since records can come back on consecutive runs.
+**Flag:** cursor kept only in memory or reset on deploy; cursor set from the
+local clock, set to "now" after the run, or set to the max `updatedAt` seen;
+no overlap; cursor advanced when the sync failed partway; inserts instead of
+upserts.
 
 ### C14. Separate jobs per data type (Guide, General practice)
 Pricing and availability change faster than content (Guide intervals:
@@ -126,9 +149,10 @@ Pricing and availability change faster than content (Guide intervals:
 watermarks lets each run at its own pace and fail on its own.
 **Flag:** one job, one interval, one watermark for everything.
 
-### C15. Periodic full resync (General practice)
-A scheduled full reload (for example nightly or weekly) repairs anything a
-missed run or a bug let drift.
+### C15. Periodic full reconciliation (Change Detection)
+Some records can disappear without appearing in a change filter. For
+long-running mirrors, run an occasional full reconciliation (for example
+weekly) alongside the incremental polls.
 **Flag:** no full resync path at all, so drift is permanent.
 
 ### C16. Poll interval sanity (Guide)
@@ -136,14 +160,27 @@ missed run or a bug let drift.
 reason, or content polled every few hours when the integration needs fresh
 listings. Recommend the Guide's ranges and let the developer adjust.
 
+### C17. Stay within the rate limit (Rate Limits, Change Detection)
+The limit is 10,000 requests every 5 minutes, per IP, and further limits can
+be applied case by case for abuse. Stagger jobs for different endpoints, and
+back off and retry later if requests start failing.
+**Flag:** many jobs firing on the same tick, per-unit fan-out with no
+concurrency cap, or retry loops with no backoff.
+
+### C18. No webhooks: poll (Webhooks FAQ, Change Detection)
+Track does not send webhooks or push notifications when PMS data changes,
+and there is no callback URL to register, for any key type. Cancellations
+come back as updates (`status: Cancelled`), not as absences.
+**Flag:** code or config that waits for a Track webhook, an endpoint built to
+receive Track callbacks, or sync logic that treats a missing reservation as
+cancelled.
+
 ## Out of scope: do not claim
 
 The published docs do not state these. Do not assert them. If the developer
 asks, say the docs do not cover it and suggest they contact Track:
 
-- Specific rate limits or throttling numbers
-- Webhooks or push notifications for these changes
-- Whether `updatedSince` on reservations is inclusive or exclusive, or how it
-  treats timestamps without an offset (C6 and C7 are documented for the unit
-  delta endpoint only)
+- Inclusive or exclusive boundaries for any endpoint not named in C7
 - Anything about internal caching on Track's side
+- Exact throttling behavior beyond the published limit (response codes,
+  headers, lockout duration)
