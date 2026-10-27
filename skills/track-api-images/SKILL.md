@@ -51,18 +51,28 @@ For each flow, answer:
 
 ### 3. Report
 
-Lead with a short summary (how images reach users today, the biggest risk).
-Then one finding per issue, most impactful first:
+1. **Summary**: two or three lines (how images reach users today, the biggest risk).
+2. **Summary table**: one row per finding, most impactful first. Keep the
+   fix to one short line; the detail goes in the blocks below.
+
+   | # | Severity | Where | Rule | Fix |
+   | --- | --- | --- | --- | --- |
+   | 1 | High | `src/cache/units.js:58` | I2 | Cache the image reference, not the signed URL |
+   | 2 | High | `templates/unit/gallery.html:18` | I1 | Wrap as `img.trackhs.com/1200x800/<s3url>` |
+
+   If there are no findings, say so instead of printing an empty table.
+
+3. **Findings**: one block per row, in the same order and numbering:
 
 ```
-[High] Listing gallery hotlinks raw S3 images
-  Where: templates/unit/gallery.html:18
-  Rule: I1 (no direct links to S3)
-  Why it matters: direct S3 links are unsupported, originals are often full
-    size without caching headers, and hotlinking sites may be blocked
-    without notice.
-  Fix: wrap the URL as https://img.trackhs.com/1200x800/<s3url> using one of
-    the site's standard sizes, or serve it from your own image host.
+2. [High] Listing gallery hotlinks raw S3 images
+     Where: templates/unit/gallery.html:18
+     Rule: I1 (no direct links to S3)
+     Why it matters: direct S3 links are unsupported, originals are often full
+       size without caching headers, and hotlinking sites may be blocked
+       without notice.
+     Fix: wrap the URL as https://img.trackhs.com/1200x800/<s3url> using one of
+       the site's standard sizes, or serve it from your own image host.
 ```
 
 Severity guide:

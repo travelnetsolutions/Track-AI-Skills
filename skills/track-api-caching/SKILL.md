@@ -46,17 +46,28 @@ For each data type, answer:
 
 ### 3. Report
 
-Lead with a short summary (how many data types are cached correctly, the
-biggest win). Then one finding per issue, most impactful first:
+1. **Summary**: two or three lines (how many data types are cached correctly,
+   the biggest win).
+2. **Summary table**: one row per finding, most impactful first. Keep the
+   fix to one short line; the detail goes in the blocks below.
+
+   | # | Severity | Where | Rule | Fix |
+   | --- | --- | --- | --- | --- |
+   | 1 | High | `src/sync/pricing.ts:42` | C2 | Use `pricingUpdatedSince` delta, refresh only returned ids |
+   | 2 | Medium | `src/sync/client.ts:17` | C6 | Send timestamps with a UTC offset |
+
+   If there are no findings, say so instead of printing an empty table.
+
+3. **Findings**: one block per row, in the same order and numbering:
 
 ```
-[High] Pricing re-downloads every unit every 5 minutes
-  Where: src/sync/pricing.ts:42
-  Rule: C2 (full snapshot once, then changes only)
-  Why it matters: every run pulls the whole portfolio instead of the handful
-    of units whose pricing changed.
-  Fix: call /pms/units/delta?pricingUpdatedSince=<watermark>, then refresh
-    pricing only for the returned ids.
+1. [High] Pricing re-downloads every unit every 5 minutes
+     Where: src/sync/pricing.ts:42
+     Rule: C2 (full snapshot once, then changes only)
+     Why it matters: every run pulls the whole portfolio instead of the handful
+       of units whose pricing changed.
+     Fix: call /pms/units/delta?pricingUpdatedSince=<watermark>, then refresh
+       pricing only for the returned ids.
 ```
 
 Severity guide:
