@@ -5,14 +5,25 @@
     "url": "https://developer.trackhs.com"
   },
   "metadata": {
-    "description": "Agent skills for developers building on the Track Hospitality APIs."
+    "description": "Agent skills for developers building on the Track Hospitality APIs.",
+    "version": "0.1.0"
   },
   "plugins": [
     {
       "name": "track-api-integration",
-      "source": "./plugins/track-api-integration",
       "description": "Skills that review and improve integrations with the Track APIs.",
-      "version": "0.1.0"
+      "source": "./",
+      "strict": false,
+      "version": "0.1.0",
+      "author": {
+        "name": "Track Hospitality",
+        "url": "https://developer.trackhs.com"
+      },
+      "homepage": "https://developer.trackhs.com",
+      "repository": "https://github.com/travelnetsolutions/Track-AI-Skills",
+      "skills": [
+        "./skills/track-api-caching"
+      ]
     }
   ]
 }
