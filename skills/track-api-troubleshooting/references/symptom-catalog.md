@@ -48,14 +48,17 @@ docs? If not, a channel key cannot call it.
 integration can hold both. For (2), the PM grants the permission.
 **Who:** PM.
 
-### 409 Invalid page provided (409)
-**Means:** the requested page is outside the valid range, even though data
-exists. Expected control flow on paginated endpoints, not a failure.
-**Causes:** paging past the last page; a page number computed from a stale
-total; data changing between pages.
+### 409 Invalid page provided (409, Empty, Ref)
+**Means:** the requested page is past the last page of results, even though
+data exists. Expected control flow on paginated endpoints, not a failure.
+**Causes:** paging past `page_count`; a page number computed from an older
+total after results shrank; hardcoded page loops.
+**Not a 409:** a query with no results returns `200` with `page: 0` and
+`page_count: 0` (see 200 below).
 **Fix:** treat it as recoverable: stop paging, or restart from page 1 with
 current parameters. Follow `_links.next` instead of computing page numbers.
-Pages are 1-based per the reference (`page` minimum 1).
+Pages start at 1 (`page` minimum 1 in the reference); `page=0` is not a
+valid page.
 **Who:** Dev.
 
 ### 200 with an empty collection (Empty, Keys)
