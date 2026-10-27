@@ -1,0 +1,18 @@
+{
+  "name": "track-ai-skills",
+  "owner": {
+    "name": "Track Hospitality",
+    "url": "https://developer.trackhs.com"
+  },
+  "metadata": {
+    "description": "Agent skills for developers building on the Track Hospitality APIs."
+  },
+  "plugins": [
+    {
+      "name": "track-api-integration",
+      "source": "./plugins/track-api-integration",
+      "description": "Skills that review and improve integrations with the Track APIs.",
+      "version": "0.1.0"
+    }
+  ]
+}

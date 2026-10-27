@@ -1,0 +1,11 @@
+{
+  "name": "track-api-integration",
+  "description": "Skills that review and improve integrations with the Track APIs.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Track Hospitality",
+    "url": "https://developer.trackhs.com"
+  },
+  "homepage": "https://developer.trackhs.com",
+  "repository": "https://github.com/travelnetsolutions/Track-AI-Skills"
+}
