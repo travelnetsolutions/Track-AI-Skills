@@ -19,6 +19,7 @@ folder into wherever your agent loads skills from.
 | Plugin | Skill | What it does |
 | --- | --- | --- |
 | track-api-integration | [track-api-caching](skills/track-api-caching/SKILL.md) | Reviews your integration's caching and sync code against the [Caching Data on a Local Server](https://developer.trackhs.com/docs/caching-data-on-local-server) guide and fixes what it finds. |
+| track-api-integration | [track-api-images](skills/track-api-images/SKILL.md) | Reviews how your site stores and serves Track listing images against [The Image Serving Process](https://developer.trackhs.com/docs/the-image-serving-process) guide: proxy use, signed URL expiry, sizes and lazy loading. |
 
 ## Adding a skill
 
