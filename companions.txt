@@ -1,0 +1,890 @@
+===== /private/tmp/claude-502/-Users-pvargas-Documents-track-core/2e362b13-595d-4151-9959-17d570b1f960/scratchpad/Track-AI-Skills/skills/track-api-caching/SKILL.md
+---
+name: track-api-caching
+description: Review and improve how a codebase caches and syncs data from the Track Hospitality API (developer.trackhs.com), following Track's "Caching Data on a Local Server" and "Change Detection and Incremental Sync" guides. Use when a developer integrating with Track wants to audit their sync jobs, cut API traffic, stop re-downloading every unit or reservation, move to delta or updatedSince syncing, pick polling intervals, or asks "is my Track integration caching correctly", "review my Track sync", "how often should I poll Track", "use the unit delta endpoint", "contentUpdatedSince / availabilityUpdatedSince / pricingUpdatedSince", or "keep a local copy of Track units, rates, availability or reservations". Works in any language.
+---
+
+# Track API caching review
+
+Audit a codebase that calls the Track API and bring its caching in line with
+Track's published guidance. The goal: take one full snapshot, then fetch only
+what changed.
+
+Source of truth is the public docs. Read [references/track-caching-rules.md](references/track-caching-rules.md)
+before reviewing. It lists every rule this skill checks, each tied to a
+published page. **Do not tell the developer about Track behavior that is not
+in that file or on developer.trackhs.com.** If you are unsure how the API
+behaves, say so and point them to the docs or to Track support.
+
+## Workflow
+
+### 1. Find the Track calls
+
+Search for the API surface. Typical signals:
+
+- Hosts: `*.trackhs.com`, `*.tracksandbox.io`, or a configured tenant domain ending in `/api`
+- Paths: `/pms/units`, `/pms/units/delta`, `/pms/units/types/delta`, `/pms/reservations`, `/v2/pms/reservations`, `/pms/units/{id}/pricing`, `/v2/pms/units/{id}/availability`
+- Params: `contentUpdatedSince`, `availabilityUpdatedSince`, `pricingUpdatedSince`, `updatedSince`, `page`, `size`, `scroll`
+
+Build an inventory: for each call, note the file and line, the data type
+(content, availability, pricing, reservations, unit types), what triggers it
+(cron, queue, request handler, startup), how often, and where results are
+stored.
+
+If you find no Track calls, say so and stop.
+
+### 2. Check each data type against the rules
+
+Go through the checklist in [references/track-caching-rules.md](references/track-caching-rules.md).
+For each data type, answer:
+
+1. Is there a local cache at all, or does every request hit Track live?
+2. Is there one initial full load, followed by change-only syncs?
+3. Does the change-only sync use the right parameter for that data type?
+4. Is the "last synced" watermark stored durably and advanced safely?
+5. Is the polling interval in the recommended range?
+6. Are pagination, timestamps and the delta response handled as documented?
+
+### 3. Report
+
+1. **Summary**: two or three lines (how many data types are cached correctly,
+   the biggest win).
+2. **Summary table**: one row per finding, most impactful first. Keep the
+   fix to one short line; the detail goes in the blocks below.
+
+   | # | Severity | Where | Rule | Fix |
+   | --- | --- | --- | --- | --- |
+   | 1 | High | `src/sync/pricing.ts:42` | C2 | Use `pricingUpdatedSince` delta, refresh only returned ids |
+   | 2 | Medium | `src/sync/client.ts:17` | C6 | Send timestamps with a UTC offset |
+
+   If there are no findings, say so instead of printing an empty table.
+
+3. **Findings**: one block per row, in the same order and numbering:
+
+```
+1. [High] Pricing re-downloads every unit every 5 minutes
+     Where: src/sync/pricing.ts:42
+     Rule: C2 (full snapshot once, then changes only)
+     Why it matters: every run pulls the whole portfolio instead of the handful
+       of units whose pricing changed.
+     Fix: call /pms/units/delta?pricingUpdatedSince=<watermark>, then refresh
+       pricing only for the returned ids.
+```
+
+Severity guide:
+
+- **High**: full reloads on a timer, no cache for data read on every request,
+  watermark that can skip changes, delta calls that silently drop a parameter.
+- **Medium**: intervals far outside the recommended range, timestamps without
+  a UTC offset or with an unencoded `+`, pagination that stops early or
+  ignores the result cap, jobs that can breach the rate limit.
+- **Low**: missing periodic full resync, logging and observability gaps.
+
+Also list what the code already does well, so the developer knows what to keep.
+
+### 4. Offer the fix
+
+Ask before editing. When asked, implement fixes in the project's own language,
+HTTP client, storage and scheduler. Do not introduce new frameworks. The
+reference sync loop in [references/sync-loop.md](references/sync-loop.md) shows
+the shape; adapt it, do not paste it.
+
+Never put API keys in code, logs, or your report. If you see credentials
+committed to the repo, flag that as a separate High finding.
+===== /private/tmp/claude-502/-Users-pvargas-Documents-track-core/2e362b13-595d-4151-9959-17d570b1f960/scratchpad/Track-AI-Skills/skills/track-api-caching/references/sync-loop.md
+# Reference sync loop
+
+Language-neutral shape of one change-only sync job. Adapt it to the
+project's HTTP client, storage and scheduler. Rule ids refer to
+[track-caching-rules.md](track-caching-rules.md).
+
+## Pricing or availability job (every 5 to 10 min)
+
+```
+KIND  = "pricing"                       # or "availability"
+PARAM = "pricingUpdatedSince"           # or "availabilityUpdatedSince"  (C3, C4: one per request)
+
+watermark = store.get_watermark(KIND)
+if watermark is None:
+    full_load(KIND)                     # C2: snapshot once
+    return
+
+resp = GET /pms/units/delta?{PARAM}={urlencode(watermark)}   # C6: offset, %2B-encoded
+next_watermark = resp.headers["Date"] - few_minutes          # C13: Track's clock, run start, overlap
+for unit_id in resp.updated:            # C8: ids only
+    data = fetch_one(KIND, unit_id)     # /pms/units/{id}/pricing or /v2/pms/units/{id}/availability
+    store.upsert(KIND, unit_id, data)   # C13: idempotent
+
+store.set_watermark(KIND, next_watermark)   # C13: only after everything succeeded
+```
+
+## Content job (every 15 to 30 min)
+
+```
+watermark      = store.get_watermark("content")
+
+resp = GET /pms/units/delta?contentUpdatedSince={urlencode(watermark)}
+next_watermark = resp.headers["Date"] - few_minutes
+
+changed = resp.updated
+for batch in chunks(changed):
+    for page in paginate(GET /pms/units?id[]={batch}&includeDescriptions=1):   # C11, C12
+        for unit in page:
+            store.upsert_unit(unit)     # C11: absent field != null, do not overwrite
+
+hidden = set(resp.removed) - set(resp.updated)   # C9: snapshot; updated wins
+store.reconcile_hidden(hidden)                    # mark hidden; compare to what you already know,
+                                                  # do not treat every id as a new removal
+
+store.set_watermark("content", next_watermark)
+```
+
+## Reservations job
+
+```
+watermark      = store.get_watermark("reservations")
+next_watermark = None
+
+for page, headers in paginate(GET /v2/pms/reservations?updatedSince={urlencode(watermark)}):  # C12
+    next_watermark = next_watermark or headers["Date"] - few_minutes   # first response = run start
+    for r in page:
+        store.upsert_reservation(r)     # C18: Cancelled arrives as an update
+
+store.set_watermark("reservations", next_watermark)
+```
+
+## Paginate helper
+
+```
+def paginate(url):
+    while url:
+        resp = GET url
+        yield resp.body._embedded.<collection>, resp.headers
+        url = resp.body._links.next.href if resp.body._links.next else None
+```
+
+Stop and alert if `total_items` is above 10,000 on a paged (non-scroll)
+collection: those results are unreachable by paging (C12).
+
+## Weekly (or as needed)
+
+```
+full_load(every kind)                   # C15: reconciliation repairs drift
+```
+
+Stagger the jobs so they do not all fire on the same tick (C17).
+===== /private/tmp/claude-502/-Users-pvargas-Documents-track-core/2e362b13-595d-4151-9959-17d570b1f960/scratchpad/Track-AI-Skills/skills/track-api-caching/references/track-caching-rules.md
+# Track caching rules
+
+Every rule here comes from a page on developer.trackhs.com. The source is
+named on each rule. Rules marked **General practice** are standard sync
+engineering, not claims about how Track behaves. Present them that way.
+
+Sources:
+
+- **Guide**: [Caching Data on a Local Server](https://developer.trackhs.com/docs/caching-data-on-local-server)
+- **Unit Delta**: API reference, `GET /pms/units/delta`
+- **Unit Collection**: API reference, `GET /pms/units`
+- **Reservations v2**: API reference, `GET /v2/pms/reservations`
+- **Unit Types Delta**: API reference, `GET /pms/units/types/delta`
+- **Change Detection**: [Change Detection and Incremental Sync](https://developer.trackhs.com/docs/change-detection-and-incremental-sync)
+- **Rate Limits**: [Rate Limits](https://developer.trackhs.com/docs/rate-limits)
+- **Webhooks FAQ**: [Does Track have any webhooks that push data out to channels?](https://developer.trackhs.com/docs/does-track-have-any-webhooks-that-push-data-out-to-channels)
+
+## The core pattern (Guide)
+
+1. Pull a full snapshot of each data type once.
+2. After that, ask only for what changed since your last sync.
+3. Delta endpoints can be called as often as you need.
+
+| Data type | Initial load | Change-only sync | Recommended interval |
+| --- | --- | --- | --- |
+| Unit content | `GET /pms/units` (all pages) | `GET /pms/units/delta?contentUpdatedSince=` or `GET /pms/units?contentUpdatedSince=` | 15 to 30 min |
+| Availability | per unit, e.g. `GET /v2/pms/units/{unitId}/availability` | `GET /pms/units/delta?availabilityUpdatedSince=`, then refresh those units | 5 to 10 min |
+| Pricing | per unit, e.g. `GET /pms/units/{unitId}/pricing` | `GET /pms/units/delta?pricingUpdatedSince=`, then refresh those units | 5 to 10 min |
+| Reservations | `GET /pms/reservations` or `/v2/pms/reservations` (all pages) | same endpoint with `updatedSince=` | every few minutes for booking channels, especially where holds auto-cancel (Change Detection) |
+| Unit types | `GET /pms/units/types` | `GET /pms/units/types/delta` | not stated |
+
+The Guide says intervals can be adjusted to fit your needs. Change Detection
+gives wider ranges: availability and pricing every few minutes to hourly,
+unit content hourly to daily, accounting, owners, CRM and work orders hourly
+to daily. Treat both as starting points, not limits. Change Detection also
+lists `updatedSince` support on CRM, owners, accounting, folio transactions,
+work orders and reviews, so the same pattern applies there.
+
+## Checklist
+
+### C1. Cache exists (Guide)
+Data that is read often (unit content, rates, availability) should be served
+from a local store, not fetched from Track on every page view or request.
+**Flag:** Track calls inside a request handler with no cache in front.
+
+### C2. Full snapshot once, then changes only (Guide)
+**Flag:** a scheduled job that re-downloads all units, all pricing, all
+availability, or all reservations on every run.
+
+### C3. Right parameter per data type (Guide, Unit Delta)
+Content uses `contentUpdatedSince`, availability uses
+`availabilityUpdatedSince`, pricing uses `pricingUpdatedSince`, reservations
+use `updatedSince`.
+**Flag:** one parameter used to detect every kind of change, for example only
+`contentUpdatedSince`, then assuming pricing and availability are fresh.
+
+### C4. One delta parameter per request (Unit Delta)
+The delta endpoint uses only one of the three parameters per call. If more
+than one is sent, it uses the first present in the order `pricingUpdatedSince`,
+`contentUpdatedSince`, `availabilityUpdatedSince` and silently ignores the rest.
+**Flag:** any delta request that sends two or three of them. That code is
+missing changes without any error.
+
+### C5. Deprecated parameter (Unit Collection)
+On `GET /pms/units`, `updatedSince` is deprecated. Use `contentUpdatedSince`.
+**Flag:** `/pms/units?updatedSince=`.
+
+### C6. Fully-qualified, URL-encoded timestamps (Unit Delta, Change Detection)
+Send ISO 8601 with a UTC offset, for example `2026-07-31T00:00:00-05:00`.
+Without an offset the value is resolved against the account's company
+timezone and the window can shift by several hours. The response's `date`
+field echoes your cutoff normalized to UTC.
+URL-encode the query string: a `+` in the offset must be sent as `%2B`, or it
+arrives as a space. Build the query with the language's query-string encoder.
+**Flag:** timestamps built as `Y-m-d H:i:s`, `toLocaleString`, a bare date, or
+any format with no offset; and query strings built by concatenation that
+leave a `+` offset unencoded.
+
+### C7. Boundaries differ by endpoint (Unit Delta, Change Detection)
+The unit delta endpoints are exclusive: a record whose timestamp exactly
+equals your cutoff is not returned. Some other filters are inclusive (for
+example accounting transactions, reviews and leads). The overlap-and-upsert
+pattern in C13 is correct either way, so code should not special-case each
+endpoint.
+**Flag:** logic that depends on a boundary being inclusive or exclusive
+instead of overlapping and upserting.
+
+### C8. Delta returns ids, not records (Unit Delta)
+`updated` is a list of unit ids. Fetch the current data for those ids
+(`GET /pms/units` accepts an `id` array filter) and upsert it.
+**Flag:** code that treats `updated` as full records, or that re-fetches every
+unit after seeing a non-empty `updated`.
+
+### C9. `removed` is a snapshot, not a change list (Unit Delta)
+`removed` appears only with `contentUpdatedSince`. It is not filtered by your
+timestamp: every call returns the full current set of units mapped to you
+that are not visible. Units never mapped to you appear in neither array. If
+an id is in both `updated` and `removed`, `updated` wins: subtract `updated`
+from `removed` before delisting anything.
+**Flag:** code that treats `removed` as "removed since last sync" (for
+example, firing a delist event for every id on every run), or that delists
+ids also present in `updated`.
+
+### C10. Only active units appear in `updated` (Unit Delta)
+New units are created inactive and do not appear in `updated` until
+activated. With a channel key, a unit also has to be mapped to that channel
+with the mapping enabled (unless the channel has `allUnitsApi`). Server keys
+are not subject to the mapping filter.
+**Flag:** onboarding logic that expects a just-created unit to show up in the
+next delta.
+
+### C11. Description fields need `includeDescriptions` with server keys (Unit Collection)
+With server keys, `shortDescription`, `longDescription`, `directions`,
+`checkinDetails`, `houseRules`, `notes` and `amenityDescription` are returned
+only when the request passes `includeDescriptions=1`. Otherwise they are
+absent, not null. Channel keys always receive them.
+**Flag:** a server-key content cache built without `includeDescriptions`, or
+an upsert that writes null over a stored description because the field was
+missing from the response.
+
+### C12. Pagination and the 10,000 result cap (Unit Collection, Reservations v2)
+Collections are paged with `page` and `size`, and limited to 10,000 total
+results (`page * size`). Follow `_links.next` until it is absent. For large
+reservation sets, `GET /v2/pms/reservations` supports `scroll` (start with
+`1`, then follow `_links.next`; sorting is disabled while scrolling).
+If a first run or a long outage produces more than 10,000 reservations,
+split the window into smaller date ranges (Change Detection). The delta
+endpoints return one response with no pagination.
+**Flag:** code that reads only the first page, assumes one page holds
+everything, or pages past 10,000 results and silently gets nothing.
+
+### C13. Durable cursor, advanced safely (Change Detection)
+Store the cursor (the point the last successful run covered) per data type
+somewhere that survives a restart. Set the next cursor to **when the run
+started, minus a few minutes of overlap**, and read that start time from the
+`Date` header of Track's first response, not the local clock, which can
+drift. Do not use the latest `updatedAt` received: reservation collections
+are not ordered by it. Save the cursor only after every page succeeded; if a
+run fails, keep the old cursor so the next run repeats the window. Upsert by
+`id`, since records can come back on consecutive runs.
+**Flag:** cursor kept only in memory or reset on deploy; cursor set from the
+local clock, set to "now" after the run, or set to the max `updatedAt` seen;
+no overlap; cursor advanced when the sync failed partway; inserts instead of
+upserts.
+
+### C14. Separate jobs per data type (Guide, General practice)
+Pricing and availability change faster than content (Guide intervals:
+5 to 10 min vs 15 to 30 min). Running them as separate jobs with their own
+watermarks lets each run at its own pace and fail on its own.
+**Flag:** one job, one interval, one watermark for everything.
+
+### C15. Periodic full reconciliation (Change Detection)
+Some records can disappear without appearing in a change filter. For
+long-running mirrors, run an occasional full reconciliation (for example
+weekly) alongside the incremental polls.
+**Flag:** no full resync path at all, so drift is permanent.
+
+### C16. Poll interval sanity (Guide)
+**Flag:** delta polling much tighter than the Guide suggests with no business
+reason, or content polled every few hours when the integration needs fresh
+listings. Recommend the Guide's ranges and let the developer adjust.
+
+### C17. Stay within the rate limit (Rate Limits, Change Detection)
+The limit is 10,000 requests every 5 minutes, per IP, and further limits can
+be applied case by case for abuse. Stagger jobs for different endpoints, and
+back off and retry later if requests start failing.
+**Flag:** many jobs firing on the same tick, per-unit fan-out with no
+concurrency cap, or retry loops with no backoff.
+
+### C18. No webhooks: poll (Webhooks FAQ, Change Detection)
+Track does not send webhooks or push notifications when PMS data changes,
+and there is no callback URL to register, for any key type. Cancellations
+come back as updates (`status: Cancelled`), not as absences.
+**Flag:** code or config that waits for a Track webhook, an endpoint built to
+receive Track callbacks, or sync logic that treats a missing reservation as
+cancelled.
+
+## Out of scope: do not claim
+
+The published docs do not state these. Do not assert them. If the developer
+asks, say the docs do not cover it and suggest they contact Track:
+
+- Inclusive or exclusive boundaries for any endpoint not named in C7
+- Anything about internal caching on Track's side
+- Exact throttling behavior beyond the published limit (response codes,
+  headers, lockout duration)
+===== /private/tmp/claude-502/-Users-pvargas-Documents-track-core/2e362b13-595d-4151-9959-17d570b1f960/scratchpad/Track-AI-Skills/skills/track-api-images/SKILL.md
+---
+name: track-api-images
+description: Review and fix how a website or app displays, stores and serves property images that come from the Track Hospitality API (developer.trackhs.com), following Track's "The Image Serving Process" guide. Use when a developer integrating with Track has listing or unit photos that are slow, broken, missing, expiring, or blocked; wants to use the Track image proxy (img.trackhs.com) or pick image sizes; is hotlinking S3 image URLs; stores image URLs from the Track API in a database; or asks "how should I serve Track images", "review my Track image handling", "why do my Track photos stop loading after an hour", "resize Track images", or "should I host Track images myself". Works with any language or frontend framework.
+---
+
+# Track API image serving review
+
+Audit how a codebase gets images from the Track API to end users and bring it
+in line with Track's published guidance. The goal: never send browsers to the
+raw S3 file. Either load images through Track's image proxy with a small set
+of fixed sizes, or download them into your own image infrastructure.
+
+Source of truth is the public docs. Read [references/track-image-rules.md](references/track-image-rules.md)
+before reviewing. It lists every rule this skill checks, each tied to the
+published guide. **Do not tell the developer about Track behavior that is not
+in that file or on developer.trackhs.com.** In particular, do not say which
+Track endpoints return public URLs and which return signed ones: the guide
+does not say. Detect it from the URL itself (see rule I2). If you are unsure
+how the API behaves, say so and point them to the docs or to Track support.
+
+## Workflow
+
+### 1. Trace the image path
+
+Find where Track image URLs enter the codebase and follow each one to where
+it is shown. Typical signals:
+
+- Hosts: `*.s3.amazonaws.com` (the guide's example is `track-pm.s3.amazonaws.com`), `s3.<region>.amazonaws.com`, `img.trackhs.com`
+- Signed URL query params: `X-Amz-Signature`, `X-Amz-Expires`, `X-Amz-Credential`, `Signature`, `Expires`
+- Code that reads image fields from Track API responses (unit images, unit type images, node images, `coverImage`, `_links.images`)
+- Rendering: `<img>`, `srcset`, `<picture>`, CSS `background-image`, framework image components (`next/image`, `NuxtImg`, `Image` in React Native, and so on)
+- Storage: columns, cache keys or JSON fields that hold image URLs
+
+Build an inventory: for each image flow, note where the URL comes from, where
+it is stored (if at all) and for how long, how it is turned into what the
+browser loads, which sizes are requested, and whether it is lazy-loaded.
+
+If you find no Track images, say so and stop.
+
+### 2. Check each flow against the rules
+
+Go through the checklist in [references/track-image-rules.md](references/track-image-rules.md).
+For each flow, answer:
+
+1. Does the browser ever load the raw S3 URL directly?
+2. Are signed URLs stored and reused after they could have expired?
+3. Is the image served through the proxy, or through the developer's own image infrastructure?
+4. How many distinct sizes are requested?
+5. Are off-screen images lazy-loaded?
+6. If self-hosting, is the download and refresh path sound?
+
+### 3. Report
+
+1. **Summary**: two or three lines (how images reach users today, the biggest risk).
+2. **Summary table**: one row per finding, most impactful first. Keep the
+   fix to one short line; the detail goes in the blocks below.
+
+   | # | Severity | Where | Rule | Fix |
+   | --- | --- | --- | --- | --- |
+   | 1 | High | `src/cache/units.js:58` | I2 | Cache the image reference, not the signed URL |
+   | 2 | High | `templates/unit/gallery.html:18` | I1 | Wrap as `img.trackhs.com/1200x800/<s3url>` |
+
+   If there are no findings, say so instead of printing an empty table.
+
+3. **Findings**: one block per row, in the same order and numbering:
+
+```
+2. [High] Listing gallery hotlinks raw S3 images
+     Where: templates/unit/gallery.html:18
+     Rule: I1 (no direct links to S3)
+     Why it matters: direct S3 links are unsupported, originals are often full
+       size without caching headers, and hotlinking sites may be blocked
+       without notice.
+     Fix: wrap the URL as https://img.trackhs.com/1200x800/<s3url> using one of
+       the site's standard sizes, or serve it from your own image host.
+```
+
+Severity guide:
+
+- **High**: raw S3 URLs reaching browsers, signed URLs stored and shown after
+  they may have expired, full-size originals on listing or search pages.
+- **Medium**: many distinct sizes, proxy URLs that differ from the documented
+  format, no lazy loading on large galleries or result grids.
+- **Low**: missing `width`/`height` attributes, no `srcset` where it would help,
+  self-hosting setups without a refresh path.
+
+Also list what the code already does well, so the developer knows what to keep.
+
+### 4. Offer the fix
+
+Ask before editing. When asked, implement fixes in the project's own language
+and frontend stack. Prefer one small helper that builds proxy URLs from a
+fixed set of named sizes, used everywhere, over ad-hoc string building. Do not
+introduce new frameworks or image services unless the developer asks; if they
+want to self-host, point them to the options in the rules file.
+
+Never put API keys in code, logs, or your report. If you see credentials
+committed to the repo, flag that as a separate High finding.
+===== /private/tmp/claude-502/-Users-pvargas-Documents-track-core/2e362b13-595d-4151-9959-17d570b1f960/scratchpad/Track-AI-Skills/skills/track-api-images/references/track-image-rules.md
+# Track image serving rules
+
+Every rule here comes from the published guide unless marked
+**General practice**. General-practice rules are standard web image
+engineering, not claims about how Track behaves. Present them that way.
+
+Source: **Guide**, [The Image Serving Process](https://developer.trackhs.com/docs/the-image-serving-process)
+
+## What the Guide says
+
+- Track APIs return images as either a public URL to the image file or a
+  signed URL that expires after 60 minutes.
+- Use those URLs only to download the image into your own infrastructure, or
+  to load it through the inline image proxy.
+- Direct links to the S3 files are unsupported. Originals are often full size
+  and may not have caching headers. Sites that hotlink images may be blocked
+  without notice.
+- The image proxy uses CDN edge caching and adds long expiration headers.
+- The first load of many images at once can be slow; later requests are
+  faster once the CDN has cached them.
+- Lazy-load images outside the viewport.
+- Use no more than 3 to 4 image sizes, for better caching and consistency.
+- If the proxy does not meet your needs, build your own image distribution.
+
+## Proxy URL format (Guide)
+
+```
+https://img.trackhs.com/<transformation>/<s3url>
+```
+
+`<s3url>` is the full S3 URL as returned, including `https://`, appended as
+is. The Guide's example uses an object on `track-pm.s3.amazonaws.com`.
+
+| Transformation | Result |
+| --- | --- |
+| `1187x791` | exact width and height |
+| `500x` | width 500, height scaled to keep the aspect ratio |
+| `x791` | height 791, width scaled to keep the aspect ratio |
+| `500x791` | scaled and cropped to a vertical frame |
+| `500` | scaled and cropped to a square |
+| `500x300` | scaled small, with slight cropping to fit |
+
+Use `<W>x` or `x<H>` to fix one dimension and scale the other.
+
+## Checklist
+
+### I1. No direct links to S3 (Guide)
+Browsers must not load the raw S3 URL: not in `<img src>`, `srcset`,
+`background-image`, Open Graph tags, emails, or a framework image component
+that passes the URL through untouched.
+**Flag:** any S3 image URL from Track reaching a browser without going
+through `img.trackhs.com` or the developer's own image host.
+
+### I2. Signed URLs expire after 60 minutes (Guide)
+Some image URLs are signed and expire after 60 minutes. The Guide does not
+list which endpoints return which kind, so detect it per URL: AWS signed URLs
+carry query params such as `X-Amz-Signature`, `X-Amz-Expires`,
+`X-Amz-Credential` (Signature V4) or `Signature` and `Expires` (V2).
+A signed URL is only good for a short-lived use: downloading it now, or
+loading it through the proxy now.
+**Flag:** signed URLs written to a database, a long-lived cache, static HTML,
+a search index, a CDN config, or an email, then shown later. Also flag code
+that strips the query string from a signed URL to "clean" it.
+**Fix:** either store the image itself (download into your own storage) or
+store a reference and fetch a fresh URL from the API when needed. Do not
+guess which one the API expects; follow what the endpoint returns.
+
+### I3. Use the proxy or your own image host (Guide)
+Every displayed image should go through `https://img.trackhs.com/...` or the
+developer's own image infrastructure.
+**Flag:** full-size originals on search results, cards, maps, thumbnails, or
+anywhere a smaller image would do.
+
+### I4. Documented proxy URL format (Guide)
+Build proxy URLs exactly as documented: transformation first, then the full
+S3 URL appended as is.
+**Flag:** proxy URLs that put the transformation after the S3 URL, drop the
+`https://` from the S3 part, use query params for sizing, or percent-encode
+the S3 URL. The Guide does not say whether these variants work; tell the
+developer to match the documented format rather than claiming they break.
+
+### I5. Three to four sizes (Guide)
+The Guide recommends no more than 3 to 4 sizes for better caching and
+consistency.
+**Flag:** more than 3 or 4 distinct transformations across the site, sizes
+computed from the viewport or container at runtime (`500x`, `512x`, `517x`...),
+or long `srcset` lists with many widths.
+**Fix:** define a small named set (for example thumb, card, hero) in one
+place and use it everywhere.
+
+### I6. Lazy-load off-screen images (Guide)
+**Flag:** galleries, carousels and result grids that load every image up
+front. Use `loading="lazy"` or the framework's lazy option for images below
+the fold. Keep the first visible image (the hero) eager.
+
+### I7. Expect a slow first load (Guide)
+The first time many images are requested at once, the proxy can be slow until
+the CDN has them cached.
+**Flag:** timeouts or error handling tuned so tightly that a cold first load
+is treated as a failure. If launching a new site or many new listings, warn
+that the first page views will be slower.
+
+### I8. Self-hosting is a valid option (Guide)
+If the proxy does not fit (custom formats, own CDN, offline use), the Guide
+points to building your own image distribution. Options it lists:
+- Commercial: Cloudinary
+- AWS: Serverless Image Handler (Lambda)
+- Open source: imgproxy, willnorris/imageproxy
+
+When self-hosting, download the image while the Track URL is valid (I2), store
+the file, and serve it from your own host with your own caching headers.
+
+### I9. Dimensions in markup (General practice)
+Set `width` and `height` (or an aspect-ratio box) matching the requested
+transformation so the page does not shift as images load.
+
+### I10. Refresh self-hosted copies (General practice)
+If you store copies of Track images, re-sync them when listing content
+changes so removed or replaced photos do not linger. Pair this with the
+`track-api-caching` skill's content sync.
+
+## Out of scope: do not claim
+
+The Guide does not state these. Do not assert them. If the developer asks,
+say the docs do not cover it and suggest they contact Track:
+
+- Which endpoints return public URLs and which return signed URLs
+- Proxy limits, rate limits, supported output formats (WebP, AVIF), quality
+  or other options beyond the dimension examples above
+- Exact cache header values or CDN cache duration
+- Whether non-documented proxy URL variants work (encoded S3 URLs, query
+  params)
+- Whether a signed URL that has already expired can still be loaded through
+  the proxy
+- How or when a site gets blocked for hotlinking
+===== /private/tmp/claude-502/-Users-pvargas-Documents-track-core/2e362b13-595d-4151-9959-17d570b1f960/scratchpad/Track-AI-Skills/skills/track-api-troubleshooting/SKILL.md
+---
+name: track-api-troubleshooting
+description: Diagnose a failing or surprising Track Hospitality API call (developer.trackhs.com) from an error, a response body or a symptom, and say what it means, the likely cause, how to confirm it, the fix, and who has to make it (the developer, the property manager in Track, or Track support). Use when a developer pastes a Track API error or response, or reports "401 Unauthorized", "403 Forbidden", "409 Invalid page provided", "422", "CONTACT_REQUIRED", "SINGLE_PAYMENT_TYPE", "PAYMENT_CHANNEL", "INVALID_CANCEL_POLICY", "Rate type is invalid or not active", an empty collection, missing units or reservations, missing description fields, a delta that misses changes, bookings stuck on Hold or auto-cancelled, a pinned policy being ignored, duplicate guests, images that stop loading, rate limiting, or "why does Track return X". Works without access to their code; uses it when available.
+---
+
+# Track API troubleshooting
+
+Turn "this Track call is failing" into a short, specific diagnosis the
+developer can act on, and make clear who has to act. Many Track problems are
+not code bugs at all: they are the key type, or a setting the property
+manager controls in Track.
+
+Source of truth is the public docs. Read [references/symptom-catalog.md](references/symptom-catalog.md)
+to match the symptom. It lists every diagnosis this skill gives, each tied to
+a published page. **Do not tell the developer about Track behavior that is
+not in that file or on developer.trackhs.com.** If nothing matches, say so,
+suggest how to narrow it down, and point them to Track support.
+
+## Workflow
+
+### 1. Get the facts
+
+From what the developer pasted, pull out:
+
+- Method and path (for example `POST /v2/pms/reservations`)
+- HTTP status, and the response body. Track errors follow RFC 7807:
+  `type`, `title`, `status`, `detail`, and sometimes `code` and
+  `validation_messages`. The `type` or `code` often names the error
+  (`CONTACT_REQUIRED`).
+- Key type in use: server, channel or Sales Link. If it is not clear, ask.
+  It changes most diagnoses.
+- For "missing data" problems: what they expected, what came back, and the
+  query string.
+
+Ask only for what is missing and needed. One question at a time.
+
+If they pasted credentials, card numbers or guest personal data, do not
+repeat them. Tell them to rotate any exposed key with the property manager.
+
+If you are inside their codebase, find the call that produced the error and
+read how the request is built. That usually confirms the cause.
+
+### 2. Match it
+
+Look up the status code, error code or symptom in
+[references/symptom-catalog.md](references/symptom-catalog.md). If more than
+one entry fits, rank them by how well the facts match and say what would
+tell them apart.
+
+### 3. Answer
+
+Keep it short. Use this shape:
+
+```
+**What it means:** one or two sentences.
+
+**Most likely cause:** the top match, tied to their facts.
+(Other possibilities, if any, as a short list.)
+
+**How to confirm:** one concrete check (a field to read, a call to make
+with a server key, a setting to ask about).
+
+**Fix:** what to change.
+
+**Who fixes it:** Developer | Property manager (in Track: <menu path>) | Track support
+
+**Docs:** link(s) to the published page(s).
+```
+
+If the fix is on the property manager's side, give the developer a one or
+two sentence request they can send them, naming the Track setting.
+
+If the companion skills would help them go further, mention them:
+`track-api-booking` (booking flow review), `track-api-caching` (sync and
+delta), `track-api-images` (photos), `track-api-getting-started` (which
+endpoints and keys).
+
+### 4. When to send them to Track support
+
+If nothing in the catalog matches, or the facts contradict the docs, say so
+plainly and suggest they email support@trackhs.com (source:
+[Getting Help](https://developer.trackhs.com/docs/getting-help)). Help them
+write the ticket, which should include:
+
+- Tenant domain (for example `{customer}.trackhs.com`)
+- Method, path and query string
+- Request body with card data, keys and personal data removed
+- Response status and body
+- Time of the request with timezone
+- Key type (never the key itself)
+- What they expected instead
+===== /private/tmp/claude-502/-Users-pvargas-Documents-track-core/2e362b13-595d-4151-9959-17d570b1f960/scratchpad/Track-AI-Skills/skills/track-api-troubleshooting/references/symptom-catalog.md
+# Track symptom catalog
+
+Every diagnosis here comes from a page on developer.trackhs.com, named on
+each entry. "Who" says who has to act: **Dev** (the developer's code),
+**PM** (the property manager, in Track), **Support** (Track support).
+
+Sources:
+
+- **Keys**: [Which API Key Do I Need?](https://developer.trackhs.com/docs/which-api-key-do-i-need), [Channel keys vs Server keys](https://developer.trackhs.com/docs/channel-keys-vs-server-keys)
+- **401**: [401: Unauthorized](https://developer.trackhs.com/docs/401-unauthorized)
+- **409**: [409: Invalid page provided](https://developer.trackhs.com/docs/status-code-409)
+- **Empty**: [200: Empty Collection](https://developer.trackhs.com/docs/200-empty-collection)
+- **Booking**: [Creating Reservations With Reservations V2](https://developer.trackhs.com/docs/creating-reservations-with-reservations-v2)
+- **Errors**: [SINGLE_PAYMENT_TYPE](https://developer.trackhs.com/docs/single_payment_type), [PAYMENT_CHANNEL](https://developer.trackhs.com/docs/payment_channel), [INVALID_CANCEL_POLICY](https://developer.trackhs.com/docs/invalid_cancel_policy)
+- **Sync**: [Change Detection and Incremental Sync](https://developer.trackhs.com/docs/change-detection-and-incremental-sync), [Caching Data on a Local Server](https://developer.trackhs.com/docs/caching-data-on-local-server)
+- **Images**: [The Image Serving Process](https://developer.trackhs.com/docs/the-image-serving-process)
+- **Reviews**: [Reviews Sync On Your Website](https://developer.trackhs.com/docs/reviews-sync-on-your-website)
+- **Rate**: [Rate Limits](https://developer.trackhs.com/docs/rate-limits)
+- **Webhooks**: [Does Track have any webhooks that push data out to channels?](https://developer.trackhs.com/docs/does-track-have-any-webhooks-that-push-data-out-to-channels)
+- **Ref**: the API reference page for the endpoint involved
+
+---
+
+## By HTTP status
+
+### 401 Unauthorized (401, Keys)
+**Means:** Track could not authenticate the request.
+**Causes:** wrong key or secret; a key for a different tenant (wrong
+`{customer}` domain); outdated key; for a channel key, the channel is not
+active in Track.
+**Confirm:** check the key, secret and tenant domain together; ask the PM
+whether the channel is active.
+**Fix:** correct the credentials or domain; the PM can issue a new key.
+**Who:** Dev, or PM for a new key or an inactive channel. Track support
+cannot create or hand out keys.
+
+### 403 Forbidden (Keys)
+**Means:** the key is valid, but this key type cannot call this endpoint.
+**Causes:**
+1. Channel key on an endpoint outside the Channel API section. Common:
+   confirm, check in, check out and their undos; folios and payments;
+   accounting; owners; housekeeping; CRM; guest communications; promo codes.
+2. Server key on an endpoint that also checks a Track permission, for
+   example Get Reviews (needs `reputation_management.reputation_management_view`).
+**Confirm:** is the endpoint listed under the Channel API section of the
+docs? If not, a channel key cannot call it.
+**Fix:** for (1), get a server key from the PM for those calls; one
+integration can hold both. For (2), the PM grants the permission.
+**Who:** PM.
+
+### 409 Invalid page provided (409, Empty, Ref)
+**Means:** the requested page is past the last page of results, even though
+data exists. Expected control flow on paginated endpoints, not a failure.
+**Causes:** paging past `page_count`; a page number computed from an older
+total after results shrank; hardcoded page loops.
+**Not a 409:** a query with no results returns `200` with `page: 0` and
+`page_count: 0` (see 200 below).
+**Fix:** treat it as recoverable: stop paging, or restart from page 1 with
+current parameters. Follow `_links.next` instead of computing page numbers.
+Pages start at 1 (`page` minimum 1 in the reference); `page=0` is not a
+valid page.
+**Who:** Dev.
+
+### 200 with an empty collection (Empty, Keys)
+**Means:** valid, authenticated, in range, and nothing matches the query.
+Not an error.
+**Causes:** filters too narrow; or, with a channel key, the channel is not
+set up to see the data (see "Data is missing" below).
+**Fix:** show "No results found" and let the user broaden the search. If
+data should be there, check channel settings with the PM.
+**Who:** Dev, or PM.
+
+### 422 CONTACT_REQUIRED (Booking, Ref)
+**Means:** a reservation create had both `contact` and `contactId`, or
+neither.
+**Fix:** send exactly one. An inline `contact` needs `firstName` and
+`lastName`.
+**Who:** Dev.
+
+### 422 "Rate type is invalid or not active." (Ref: Create Reservation V2)
+**Means:** the `rateTypeId` sent on create was not found or is not active.
+**Fix:** omit `rateTypeId` to let Track pick the best available rate, or
+use one returned by `GET /pms/units/{unitId}/pricing` for that unit.
+**Who:** Dev, or PM if the rate type should be active.
+
+### Validation error when sending a payment (Booking)
+**Means:** usually both `payment` and `holdCard` were sent; they are
+mutually exclusive.
+**Fix:** send one, chosen by the quote's `guaranteePolicy.type`
+(`payment` for `Deposit` / `FullDeposit`, `holdCard` for `Guarantee` / `Hold`).
+**Who:** Dev. See `track-api-booking`.
+
+## By error code
+
+### SINGLE_PAYMENT_TYPE (Errors)
+**Means:** the `payment` object had more than one payment method, or none.
+With an `amount`, exactly one method must be sent.
+**Fix:** send one method (credit card, e-check, net commission, ...).
+**Who:** Dev.
+
+### PAYMENT_CHANNEL (Errors, Keys)
+**Means:** the payment method is not allowed for the Distribution Channel,
+for example net commission on a channel set to card and e-check only.
+Channel keys can only use electronic methods (card, e-check).
+**Fix:** use an allowed method, or the PM changes the channel's payment
+settings.
+**Who:** Dev or PM (Configuration > PMS Setup > Distribution Channels).
+
+### INVALID_CANCEL_POLICY (Errors)
+**Means:** the cancellation policy sent is inactive or not available to the
+unit, or the unit has no active cancellation policy.
+**Fix:** stop hardcoding `cancellationPolicyId` (with a channel, it is set
+from the unit); the PM activates or assigns a policy.
+**Who:** PM (Configuration > PMS Setup > Cancellation Policies, or the unit
+profile's Reservations tab).
+
+## Booking outcomes (no error)
+
+| Symptom | Likely cause | Fix | Who |
+| --- | --- | --- | --- |
+| Every reservation comes back `Hold` | `Guarantee` policy, card sent as `payment` | Send `holdCard` | Dev |
+| `Hold` at one PM, `Confirmed` at another, same payload | Different policy types | Quote first, branch on `guaranteePolicy.type` | Dev |
+| Reservation's policy differs from the quote's | Quote's `guaranteePolicyId` not sent on create | Send it, flat | Dev |
+| Auto-cancelled about an hour after booking | `Deposit` policy with `holdCard`; nothing collected before `holdExpiresAt` | Send `payment` for `Deposit` / `FullDeposit` | Dev |
+| `Deposit` booking on `Hold`, nothing charged | No installment due today | Check the quote's `paymentPlan` | Expected |
+| Pinned `guaranteePolicyId` ignored | Channel key; channel has its own active policy | PM checks the channel's guarantee policy | PM |
+| Still `Hold` with the right payment field | Channel in Request mode, or policy type `Hold` | Expected; PM confirms in Track | PM |
+| Guest got "confirmed", PM says cancelled | Code did not read `status` / `holdExpiresAt` and did not poll | Read status; poll `updatedSince` | Dev |
+| New contact created on every booking | Inline contact with no email or phone (cannot be matched) (Ref) | Send `primaryEmail` / phone, or `contactId` | Dev |
+| Create fails on a duplicate contact | Matched contact updated with an email or phone another contact already has (Ref) | Look up with CRM Contacts (server key) and send `contactId` | Dev |
+
+Source: Booking, plus the Create Reservation V2 reference for contacts.
+
+## Data is missing (no error)
+
+| Symptom | Likely cause | Fix | Who |
+| --- | --- | --- | --- |
+| Channel key sees fewer units than exist | Units not added to the channel, and **All Units Available** off (Keys) | PM adds units or enables the setting | PM |
+| Node endpoints do not work with a channel key | **Enable Node API** off on the channel (Keys) | PM enables it | PM |
+| Channel key sees only some reservations | Only this channel's bookings, unless **All Reservations Available** (Keys) | PM enables it if appropriate | PM |
+| No contact details on reservations (channel key) | **Include Contact** off (Keys) | PM enables it | PM |
+| Fewer rate types on pricing with a channel key | Only rate types available to the channel for that unit (Keys) | Expected; PM adjusts rate type setup | PM |
+| Description fields absent on units with a server key | `includeDescriptions=1` not sent; fields are absent, not null (Ref: Units) | Add `includeDescriptions=1` | Dev |
+| Availability returns no data for later dates | Rates or seasons not configured out to the max booking window (Quick Start) | PM extends rates / seasons | PM |
+| Reviews have no guest, reservation or unit context | Channel key gets body and ratings only (Reviews, Keys) | Server key with the reputation permission | PM |
+| A record seems to vanish with a channel key | PM changed a channel setting (Sync) | Check with the PM | PM |
+| Paging stops returning results past 10,000 | `page * size` capped at 10,000 (Ref, Sync) | Narrow date windows, or `scroll` on Reservations V2 | Dev |
+
+Source for "Quick Start": [Quick Start Guide](https://developer.trackhs.com/docs/quick-start-guide).
+
+## Sync and delta (no error)
+
+| Symptom | Likely cause | Fix | Who |
+| --- | --- | --- | --- |
+| Delta misses availability or pricing changes | More than one `*UpdatedSince` sent; only the first (pricing, content, availability order) is used (Ref: Unit Delta) | One parameter per call | Dev |
+| Window shifted by hours | Timestamp without UTC offset, read in the account's timezone (Ref, Sync) | Send full ISO 8601 with offset | Dev |
+| Offset ignored or request odd with `+` | `+` not URL-encoded, arrives as a space (Sync) | Encode as `%2B`; use a query encoder | Dev |
+| New unit never appears in delta `updated` | Units are created inactive; channel keys also need the unit mapped and enabled (Ref: Unit Delta) | PM activates and maps it | PM |
+| Same units in `removed` on every call | `removed` is a full snapshot, not changes since your cursor (Ref, Sync) | Diff it against what you show | Dev |
+| A unit is in both `updated` and `removed` | Inconsistent channel mapping (Ref: Unit Delta) | Trust `updated`; report the mapping | Dev, PM |
+| Changes missed between runs | Cursor from local clock, max `updatedAt`, no overlap, or advanced after a failed run (Sync) | Cursor = run start from Track's `Date` header minus a few minutes, saved only on success | Dev |
+| Cancelled reservations "disappear" from the mirror | Code treats absence as cancel; cancellations arrive as updates (Sync) | Handle `status: Cancelled` as an update | Dev |
+| Waiting for a webhook that never comes | Track has no webhooks for data changes (Webhooks) | Poll with `updatedSince` / delta | Dev |
+| Reservation search order looks random | `sortColumn` value not in the documented list falls back to internal id (Ref: Reservations V2) | Use a documented `sortColumn` | Dev |
+| Reservation `search` misses a substring | `search` is a prefix match at the start of a word; a leading `+` searches phone only (Ref: Reservations V2) | Use `contactId` / `unitId` to filter exactly | Dev |
+
+See `track-api-caching` for a full review of the sync code.
+
+## Images (no error)
+
+| Symptom | Likely cause | Fix | Who |
+| --- | --- | --- | --- |
+| Images break about an hour later | Signed URLs (expire after 60 minutes) stored and reused (Images) | Store the image or refetch the URL; or load through the proxy at once | Dev |
+| Images blocked or unreliable | Hotlinking S3 directly, which is unsupported and can be blocked (Images) | Use `img.trackhs.com/<size>/<s3url>` or self-host | Dev |
+| First page load of images is slow | Proxy cold cache on first request (Images) | Expected; later loads are cached | Expected |
+
+See `track-api-images` for a full review.
+
+## Volume
+
+### Requests start failing under load (Rate)
+**Means:** possibly the rate limit: 10,000 requests every 5 minutes, per
+IP. Further limits can be applied case by case for abuse.
+**Fix:** cache and use delta endpoints instead of re-reading; stagger jobs;
+back off and retry later.
+**Who:** Dev.
+The docs do not state the status code or headers returned when the limit is
+hit. Do not claim them.
+
+---
+
+## Not in the docs: do not claim
+
+If the symptom is one of these, say the docs do not cover it and suggest
+Track support:
+
+- 404 or 5xx causes for a specific endpoint
+- The status code, headers or lockout window when the rate limit is hit
+- Whether a request that timed out was processed
+- Anything about Track outages or maintenance
