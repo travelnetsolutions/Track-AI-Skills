@@ -19,6 +19,7 @@ folder into wherever your agent loads skills from.
 | Plugin | Skill | What it does |
 | --- | --- | --- |
 | track-api-integration | [track-api-getting-started](skills/track-api-getting-started/SKILL.md) | Start here. Recommends the endpoints, key type and call order for what you are building, explains server vs channel keys and 401 vs 403, maps how Track entities connect, and turns a feature into the endpoints that deliver it. |
+| track-api-integration | [track-api-booking](skills/track-api-booking/SKILL.md) | Reviews your quote-and-book flow against [Creating Reservations With Reservations V2](https://developer.trackhs.com/docs/creating-reservations-with-reservations-v2): payment vs holdCard by policy type, pinned policy, Hold follow-up, contacts, fraud data and documented errors. |
 | track-api-integration | [track-api-caching](skills/track-api-caching/SKILL.md) | Reviews your integration's caching and sync code against the [Caching Data on a Local Server](https://developer.trackhs.com/docs/caching-data-on-local-server) guide and fixes what it finds. |
 | track-api-integration | [track-api-images](skills/track-api-images/SKILL.md) | Reviews how your site stores and serves Track listing images against [The Image Serving Process](https://developer.trackhs.com/docs/the-image-serving-process) guide: proxy use, signed URL expiry, sizes and lazy loading. |
 
