@@ -22,6 +22,7 @@ folder into wherever your agent loads skills from.
 | track-api-integration | [track-api-booking](skills/track-api-booking/SKILL.md) | Reviews your quote-and-book flow against [Creating Reservations With Reservations V2](https://developer.trackhs.com/docs/creating-reservations-with-reservations-v2): payment vs holdCard by policy type, pinned policy, Hold follow-up, contacts, fraud data and documented errors. |
 | track-api-integration | [track-api-caching](skills/track-api-caching/SKILL.md) | Reviews your integration's caching and sync code against the [Caching Data on a Local Server](https://developer.trackhs.com/docs/caching-data-on-local-server) guide and fixes what it finds. |
 | track-api-integration | [track-api-images](skills/track-api-images/SKILL.md) | Reviews how your site stores and serves Track listing images against [The Image Serving Process](https://developer.trackhs.com/docs/the-image-serving-process) guide: proxy use, signed URL expiry, sizes and lazy loading. |
+| track-api-integration | [track-api-troubleshooting](skills/track-api-troubleshooting/SKILL.md) | Paste a Track API error, response or symptom and get what it means, the likely cause, how to confirm it, the fix, and who has to make it (you, the property manager, or Track support). |
 
 ## Adding a skill
 
