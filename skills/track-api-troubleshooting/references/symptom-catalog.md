@@ -144,7 +144,7 @@ Source: Booking, plus the Create Reservation V2 reference for contacts.
 | Availability returns no data for later dates | Rates or seasons not configured out to the max booking window (Quick Start) | PM extends rates / seasons | PM |
 | Reviews have no guest, reservation or unit context | Channel key gets body and ratings only (Reviews, Keys) | Server key with the reputation permission | PM |
 | A record seems to vanish with a channel key | PM changed a channel setting (Sync) | Check with the PM | PM |
-| Paging stops returning results past 10,000 | `page * size` capped at 10,000 (Ref, Sync) | Narrow date windows, or `scroll` on Reservations V2 | Dev |
+| Paging fails with an error past 10,000 results | `page * size` is capped at 10,000; requests past it return an error, not results (Ref, Sync) | Narrow date windows, or `scroll` on Reservations V2 | Dev |
 
 Source for "Quick Start": [Quick Start Guide](https://developer.trackhs.com/docs/quick-start-guide).
 

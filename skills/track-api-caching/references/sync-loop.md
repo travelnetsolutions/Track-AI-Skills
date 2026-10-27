@@ -70,7 +70,8 @@ def paginate(url):
 ```
 
 Stop and alert if `total_items` is above 10,000 on a paged (non-scroll)
-collection: those results are unreachable by paging (C12).
+collection: requests past the cap return an error, so those results are
+unreachable by paging. Split the window or use `scroll` (C12).
 
 ## Weekly (or as needed)
 

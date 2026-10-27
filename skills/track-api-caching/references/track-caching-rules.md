@@ -126,8 +126,10 @@ reservation sets, `GET /v2/pms/reservations` supports `scroll` (start with
 If a first run or a long outage produces more than 10,000 reservations,
 split the window into smaller date ranges (Change Detection). The delta
 endpoints return one response with no pagination.
+Requests past the cap return an error, not results.
 **Flag:** code that reads only the first page, assumes one page holds
-everything, or pages past 10,000 results and silently gets nothing.
+everything, or pages toward the cap with no plan for what happens there
+(for example, treating the error as "no more data" and stopping early).
 
 ### C13. Durable cursor, advanced safely (Change Detection)
 Store the cursor (the point the last successful run covered) per data type

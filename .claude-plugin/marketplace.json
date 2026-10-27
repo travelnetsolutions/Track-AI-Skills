@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Agent skills for developers building on the Track Hospitality APIs.",
-    "version": "0.6.0"
+    "version": "0.6.1"
   },
   "plugins": [
     {
@@ -14,7 +14,7 @@
       "description": "Skills that review and improve integrations with the Track APIs.",
       "source": "./",
       "strict": false,
-      "version": "0.6.0",
+      "version": "0.6.1",
       "author": {
         "name": "Track Hospitality",
         "url": "https://developer.trackhs.com"
